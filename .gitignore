@@ -1,0 +1,6 @@
+.claude/
+.test/
+*.mp3
+*.wav
+*.flac
+*.ogg

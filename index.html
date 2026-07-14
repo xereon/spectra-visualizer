@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>SPECTRA &mdash; Audio-Reactive 3D Visualizer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400..900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<div id="bootError" style="position:fixed;top:0;left:0;right:0;z-index:100;background:#7a1020;color:#fff;font-family:sans-serif;font-size:14px;padding:12px 18px;text-align:center;">
+  The app failed to start. Open it over HTTP — e.g. <b>http://localhost:8877</b> (preview server) or <b>http://localhost/claude/</b> (XAMPP) — not by double-clicking the file. An internet connection is also required for the 3D libraries.
+</div>
+
+<canvas id="scene"></canvas>
+<canvas id="razor" aria-hidden="true"></canvas>
+
+<div id="dropzone">
+  <div class="dropzone-inner">
+    <div class="dropzone-icon">&#9835;</div>
+    <div class="dropzone-text">DROP AUDIO FILES</div>
+    <div class="dropzone-sub">MP3 &middot; WAV &middot; FLAC &middot; OGG &mdash; or click to browse</div>
+    <input type="file" id="fileInput" accept="audio/*" multiple hidden>
+  </div>
+</div>
+
+<header id="topbar">
+  <div class="brand">
+    <span class="brand-mark">&#9670;</span>
+    <span class="brand-name">SPECTRA</span>
+  </div>
+  <div class="topbar-meta">
+    <span id="trackTitle">No track loaded</span>
+    <span id="trackMeta" class="dim"></span>
+  </div>
+  <div class="topbar-actions">
+    <span id="fps" class="fps">60 FPS</span>
+    <button class="icon-btn" id="btnMic" title="Microphone input (I)">&#127908;</button>
+    <button class="icon-btn" id="btnShot" title="Save screenshot (X)">&#128247;</button>
+    <button class="icon-btn" id="btnPlaylist" title="Playlist (P)">&#9776;</button>
+    <button class="icon-btn" id="btnVisuals" title="Visuals (V)">&#9881;</button>
+    <button class="icon-btn" id="btnFx" title="Audio FX (F)">&#9839;</button>
+    <button class="icon-btn" id="btnFullscreen" title="Fullscreen (Enter)">&#9974;</button>
+  </div>
+</header>
+
+<!-- PLAYLIST DRAWER -->
+<aside class="drawer" id="drawerPlaylist">
+  <div class="drawer-head"><span>PLAYLIST</span><button class="closeBtn" data-close="drawerPlaylist">&times;</button></div>
+  <div class="drawer-body">
+    <button id="btnAddFiles" class="ghost-btn">+ Add Files</button>
+    <ul id="playlist"></ul>
+  </div>
+</aside>
+
+<!-- VISUALS DRAWER -->
+<aside class="drawer" id="drawerVisuals">
+  <div class="drawer-head"><span>VISUALS</span><button class="closeBtn" data-close="drawerVisuals">&times;</button></div>
+  <div class="drawer-body">
+
+    <button class="ghost-btn" id="btnResetVisuals">&#8634; Reset Visuals</button>
+    <div class="ctl-row toggle-row"><label>&#127881; Party Mode (auto-cycle scenes)</label><input type="checkbox" id="ctlParty"></div>
+
+    <div class="section-label">Theme</div>
+    <div id="themeGrid" class="theme-grid"></div>
+
+    <div class="ctl-row">
+      <label>Hue Shift <span class="val" id="valHue">0&deg;</span></label>
+      <input type="range" id="hueSlider" min="0" max="360" step="1" value="0" class="hue-slider">
+    </div>
+
+    <div class="section-label">Scene Mode</div>
+    <div class="btn-group" id="sceneModeGroup">
+      <button data-mode="razor">Razor Waves</button>
+      <button data-mode="tunnel" class="active">Tunnel</button>
+      <button data-mode="rings">Rings</button>
+      <button data-mode="particles">Particles</button>
+      <button data-mode="crystal">Crystal</button>
+      <button data-mode="waveform">Waveform</button>
+      <button data-mode="cubes">Cube Field</button>
+      <button data-mode="terrain">Terrain</button>
+      <button data-mode="nova">Nova</button>
+      <button data-mode="galaxy">Galaxy</button>
+      <button data-mode="scope">Scope</button>
+    </div>
+
+    <div class="section-label">Camera</div>
+    <div class="btn-group" id="cameraModeGroup">
+      <button data-cam="auto" class="active">Auto Orbit</button>
+      <button data-cam="flythrough">Flythrough</button>
+      <button data-cam="free">Free (drag)</button>
+      <button data-cam="top">Top Down</button>
+    </div>
+
+    <div class="section-label">Background</div>
+    <div class="btn-group" id="bgModeGroup">
+      <button data-bg="space" class="active">Deep Space</button>
+      <button data-bg="grid">Grid</button>
+      <button data-bg="matrix">Matrix Rain</button>
+      <button data-bg="black">Black</button>
+    </div>
+
+    <div class="section-label">Render</div>
+    <div class="ctl-row"><label>Bloom <span class="val" id="valBloom">1.2</span></label><input type="range" id="ctlBloom" min="0" max="3" step="0.05" value="1.2"></div>
+    <div class="ctl-row"><label>Brightness <span class="val" id="valBrightness">1.0</span></label><input type="range" id="ctlBrightness" min="0.3" max="2" step="0.05" value="1.0"></div>
+    <div class="ctl-row"><label>Particle Count <span class="val" id="valParticles">8000</span></label><input type="range" id="ctlParticles" min="500" max="20000" step="500" value="8000"></div>
+    <div class="ctl-row"><label>Particle Size <span class="val" id="valPSize">1.4</span></label><input type="range" id="ctlPSize" min="0.2" max="4" step="0.1" value="1.4"></div>
+    <div class="ctl-row"><label>Rotation Speed <span class="val" id="valRotSpeed">1.0</span></label><input type="range" id="ctlRotSpeed" min="0" max="3" step="0.05" value="1.0"></div>
+    <div class="ctl-row"><label>Camera Speed <span class="val" id="valCamSpeed">1.0</span></label><input type="range" id="ctlCamSpeed" min="0" max="3" step="0.05" value="1.0"></div>
+    <div class="ctl-row"><label>Sensitivity <span class="val" id="valSens">1.0</span></label><input type="range" id="ctlSens" min="0.1" max="3" step="0.05" value="1.0"></div>
+    <div class="ctl-row"><label>Trail Length <span class="val" id="valTrail">0.6</span></label><input type="range" id="ctlTrail" min="0" max="0.95" step="0.02" value="0.6"></div>
+    <div class="ctl-row"><label>Wave Height <span class="val" id="valWaveH">1.0</span></label><input type="range" id="ctlWaveH" min="0" max="3" step="0.05" value="1.0"></div>
+
+    <div class="section-label">RAZOR Spectrum Overlay</div>
+    <div class="ctl-row toggle-row"><label>Show Spectrum</label><input type="checkbox" id="ctlRazorShow" checked></div>
+    <div class="ctl-row"><label>Partials <span class="val" id="valPartials">48</span></label><input type="range" id="ctlPartials" min="12" max="96" step="4" value="48"></div>
+  </div>
+</aside>
+
+<!-- AUDIO FX DRAWER -->
+<aside class="drawer" id="drawerFx">
+  <div class="drawer-head"><span>AUDIO FX</span><button class="closeBtn" data-close="drawerFx">&times;</button></div>
+  <div class="drawer-body">
+
+    <button class="ghost-btn" id="btnResetFx">&#8634; Reset All Audio FX</button>
+
+    <div class="section-label">Voice / Pitch Presets</div>
+    <div class="preset-grid" id="voicePresets">
+      <button data-preset="normal">Normal</button>
+      <button data-preset="podcast">🎤 Podcast</button>
+      <button data-preset="trailer">🎬 Trailer</button>
+      <button data-preset="cartoon">👶 Cartoon</button>
+      <button data-preset="robot">🤖 Robot</button>
+      <button data-preset="monster">👹 Monster</button>
+      <button data-preset="chipmunk">🐿️ Chipmunk</button>
+      <button data-preset="vinyl">🎚️ Vinyl</button>
+    </div>
+
+    <div class="section-label">Pitch &amp; Tempo <span class="hint">(independent — tempo unaffected by pitch)</span></div>
+    <div class="ctl-row">
+      <label>Pitch <span class="val" id="valPitch">0 st</span></label>
+      <input type="range" id="ctlPitch" min="-12" max="12" step="1" value="0">
+    </div>
+    <div class="ctl-row">
+      <label>Fine Pitch <span class="val" id="valFinePitch">0 ct</span></label>
+      <input type="range" id="ctlFinePitch" min="-100" max="100" step="1" value="0">
+    </div>
+    <div class="ctl-row">
+      <label>Tempo <span class="val" id="valTempo">100%</span></label>
+      <input type="range" id="ctlTempo" min="50" max="200" step="1" value="100">
+    </div>
+    <div class="ctl-row toggle-row">
+      <label>Key Lock (independent pitch/tempo)</label>
+      <input type="checkbox" id="ctlKeyLock" checked>
+    </div>
+    <button class="ghost-btn small" id="btnResetPitch">Reset Pitch/Tempo</button>
+
+    <div class="section-label">Tone Shaping</div>
+    <div class="ctl-row"><label>Formant / Vocal Depth <span class="val" id="valFormant">0</span></label><input type="range" id="ctlFormant" min="-6" max="6" step="0.5" value="0"></div>
+    <div class="ctl-row"><label>Bass Enhance <span class="val" id="valBass">0 dB</span></label><input type="range" id="ctlBass" min="0" max="12" step="0.5" value="0"></div>
+    <div class="ctl-row"><label>Treble <span class="val" id="valTreble">0 dB</span></label><input type="range" id="ctlTreble" min="-12" max="12" step="0.5" value="0"></div>
+    <div class="ctl-row"><label>Stereo Width <span class="val" id="valWidth">100%</span></label><input type="range" id="ctlWidth" min="0" max="200" step="5" value="100"></div>
+
+    <div class="section-label">Space &amp; Filters</div>
+    <div class="ctl-row"><label>Reverb <span class="val" id="valReverb">0%</span></label><input type="range" id="ctlReverb" min="0" max="100" step="1" value="0"></div>
+    <div class="ctl-row"><label>Echo <span class="val" id="valEcho">0%</span></label><input type="range" id="ctlEcho" min="0" max="100" step="1" value="0"></div>
+    <div class="ctl-row"><label>Low Pass <span class="val" id="valLP">20000 Hz</span></label><input type="range" id="ctlLP" min="200" max="20000" step="100" value="20000"></div>
+    <div class="ctl-row"><label>High Pass <span class="val" id="valHP">20 Hz</span></label><input type="range" id="ctlHP" min="20" max="5000" step="10" value="20"></div>
+
+    <div class="section-label">Dynamics</div>
+    <div class="ctl-row"><label>Compressor <span class="val" id="valComp">Off</span></label><input type="range" id="ctlComp" min="0" max="100" step="1" value="0"></div>
+    <div class="ctl-row toggle-row"><label>Limiter</label><input type="checkbox" id="ctlLimiter" checked></div>
+  </div>
+</aside>
+
+<!-- RAZOR-style centerpiece label (small HUD) -->
+<div id="hud">
+  <div class="hud-item"><span class="hud-label">BPM</span><span class="hud-value" id="hudBpm">--</span></div>
+  <div class="hud-item"><span class="hud-label">BASS</span><span class="hud-value" id="hudBass">0</span></div>
+  <div class="hud-item"><span class="hud-label">MID</span><span class="hud-value" id="hudMid">0</span></div>
+  <div class="hud-item"><span class="hud-label">TREBLE</span><span class="hud-value" id="hudTreble">0</span></div>
+</div>
+
+<!-- TRANSPORT -->
+<footer id="transport">
+  <div class="seek-row">
+    <span id="timeCur">0:00</span>
+    <input type="range" id="seekBar" min="0" max="1000" value="0" step="1">
+    <span id="timeDur">0:00</span>
+  </div>
+  <div class="transport-row">
+    <div class="transport-left">
+      <button class="icon-btn" id="btnShuffle" title="Shuffle (S)">&#128256;</button>
+      <button class="icon-btn" id="btnRepeat" title="Repeat (R)">&#128257;</button>
+    </div>
+    <div class="transport-center">
+      <button class="icon-btn big" id="btnPrev" title="Previous">&#9198;</button>
+      <button class="icon-btn xbig" id="btnPlay" title="Play/Pause (Space)">&#9654;</button>
+      <button class="icon-btn big" id="btnNext" title="Next">&#9197;</button>
+    </div>
+    <div class="transport-right">
+      <button class="icon-btn" id="btnMute" title="Mute (M)">&#128266;</button>
+      <input type="range" id="volumeBar" min="0" max="100" value="80" step="1">
+    </div>
+  </div>
+</footer>
+
+<div id="toast"></div>
+
+<script type="module" src="js/main.js?v=4"></script>
+</body>
+</html>
