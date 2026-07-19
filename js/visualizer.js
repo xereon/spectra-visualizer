@@ -45,7 +45,28 @@ export class Visualizer {
   }
 
   _initThree() {
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: true });
+    // some GPUs/drivers reject specific context options — retry with
+    // progressively more conservative settings before giving up
+    const attempts = [
+      { antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: true },
+      { antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: true },
+      { antialias: false, powerPreference: 'default', preserveDrawingBuffer: false },
+    ];
+    let lastErr = null;
+    for (let i = 0; i < attempts.length; i++) {
+      // a canvas that failed context creation is poisoned — retry on a fresh one
+      const canvas = i === 0 ? this.canvas : this.canvas.cloneNode(false);
+      try {
+        this.renderer = new THREE.WebGLRenderer({ canvas, alpha: false, ...attempts[i] });
+        if (canvas !== this.canvas) {
+          this.canvas.replaceWith(canvas);
+          this.canvas = canvas;
+        }
+        lastErr = null;
+        break;
+      } catch (e) { lastErr = e; }
+    }
+    if (lastErr) throw lastErr;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setClearColor(0x000000, 1);
