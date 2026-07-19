@@ -1,14 +1,28 @@
-import { AudioEngine } from './audio-engine.js?v=4';
-import { Visualizer } from './visualizer.js?v=4';
-import { RazorOverlay } from './razor-overlay.js?v=4';
-import { THEMES, applyTheme } from './themes.js?v=4';
+import { AudioEngine } from './audio-engine.js?v=6';
+import { Visualizer } from './visualizer.js?v=6';
+import { RazorOverlay } from './razor-overlay.js?v=6';
+import { THEMES, applyTheme } from './themes.js?v=6';
 
 // the boot-error banner is shown by default in the HTML; reaching this line
 // means modules loaded, so remove it
 document.getElementById('bootError')?.remove();
 
 const engine = new AudioEngine();
-const viz = new Visualizer(document.getElementById('scene'));
+
+// WebGL can be unavailable (old GPUs, disabled drivers, sandboxed browsers);
+// degrade to audio + the 2D spectrum overlay instead of a dead page
+let viz;
+try {
+  viz = new Visualizer(document.getElementById('scene'));
+} catch (err) {
+  console.error('3D visuals disabled:', err);
+  viz = {
+    params: { sceneMode: 'none', hue: 262 },
+    setParam(k, v) { this.params[k] = v; },
+    update() {},
+  };
+  setTimeout(() => toast('WebGL unavailable — 3D visuals off, audio and spectrum still work'), 600);
+}
 const razor = new RazorOverlay(document.getElementById('razor'));
 
 const el = (id) => document.getElementById(id);
@@ -150,13 +164,18 @@ function removeTrack(i) {
   renderPlaylist();
 }
 
+let loadSeq = 0;
 async function loadTrack(index, autoplay) {
   const track = state.playlist[index];
   if (!track) return;
+  const mySeq = ++loadSeq;
   try {
-    const arrayBuffer = track.arrayBuffer || await track.file.arrayBuffer();
-    track.arrayBuffer = arrayBuffer.slice(0);
-    await engine.loadArrayBuffer(arrayBuffer);
+    const result = await engine.load(track.file);
+    // a newer load started while this one was decoding — let it win
+    if (result === null || mySeq !== loadSeq) return;
+    if (result.mode === 'stream') {
+      toast('Long track — streaming mode (tempo works, pitch shift unavailable)');
+    }
     state.currentIndex = index;
     renderPlaylist();
     el('trackTitle').textContent = track.name;
@@ -281,8 +300,8 @@ window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
   switch (e.code) {
     case 'Space': e.preventDefault(); el('btnPlay').click(); break;
-    case 'ArrowRight': engine.seekFraction((engine.currentTime + 5) / engine.duration); break;
-    case 'ArrowLeft': engine.seekFraction((engine.currentTime - 5) / engine.duration); break;
+    case 'ArrowRight': if (engine.duration > 0) engine.seekFraction((engine.currentTime + 5) / engine.duration); break;
+    case 'ArrowLeft': if (engine.duration > 0) engine.seekFraction((engine.currentTime - 5) / engine.duration); break;
     case 'ArrowUp': e.preventDefault(); volumeBar.value = Math.min(100, +volumeBar.value + 5); volumeBar.dispatchEvent(new Event('input')); break;
     case 'ArrowDown': e.preventDefault(); volumeBar.value = Math.max(0, +volumeBar.value - 5); volumeBar.dispatchEvent(new Event('input')); break;
     case 'KeyN': gotoRelative(1); break;

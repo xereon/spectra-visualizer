@@ -21,6 +21,19 @@ export class AudioEngine {
     this.shifter = null;
     this.buffer = null;
     this.playing = false;
+    this.mode = 'none'; // none | buffer (SoundTouch) | stream (long tracks)
+    this._loadGen = 0;
+    this._endedFired = false;
+    this.streamEl = null;
+    this.streamSrc = null;
+    this._objectUrl = null;
+    this._streamMetaDuration = NaN;
+    this.impl = 'none'; // worklet | scriptprocessor (buffer mode DSP backend)
+    this.workletNode = null;
+    this._workletReady = undefined;
+    this._workletPos = 0;
+    this._bufSampleRate = 44100;
+    this._bufferDuration = 0;
     this.keyLock = true;
     this.pitchSemitones = 0;
     this.fineCents = 0;
@@ -198,20 +211,141 @@ export class AudioEngine {
     throw firstErr;
   }
 
-  async loadArrayBuffer(arrayBuffer) {
-    // decodeAudioData works on a suspended context; never block loading on
-    // resume() — without user activation it can stay pending forever
-    this._teardownShifter();
-    const audioBuffer = await this._decode(arrayBuffer);
-    this.buffer = audioBuffer;
-    this.shifter = new PitchShifter(this.ctx, audioBuffer, 4096, () => {
-      this.playing = false;
-      if (this.onEndedCb) this.onEndedCb();
+  // Tracks longer than this stream through an <audio> element instead of being
+  // fully decoded: a 60-min MP3 decodes to ~1.3 GB of PCM, which is what caused
+  // glitchy playback. Streaming keeps tempo control (native time-stretch via
+  // preservesPitch) but semitone pitch-shifting needs the full buffer, so it is
+  // unavailable for long tracks.
+  static LONG_TRACK_SECONDS = 600;
+
+  _probeDuration(url) {
+    return new Promise((resolve) => {
+      const a = new Audio();
+      let settled = false;
+      const done = (v) => { if (!settled) { settled = true; a.src = ''; resolve(v); } };
+      a.preload = 'metadata';
+      a.onloadedmetadata = () => done(a.duration);
+      a.onerror = () => done(NaN);
+      setTimeout(() => done(NaN), 5000);
+      a.src = url;
     });
+  }
+
+  // load() is racy by nature (decode is slow, users skip fast); every await is
+  // followed by a generation check so a superseded load can never clobber the
+  // current one and leave an orphaned, still-playing node behind.
+  async load(blob) {
+    const gen = ++this._loadGen;
+    this.pause();
+    this._teardownShifter();
+    this._teardownStream();
+    this._teardownWorklet();
+    this.buffer = null;
+    this._bufferDuration = 0;
+
+    const url = URL.createObjectURL(blob);
+    const metaDuration = await this._probeDuration(url);
+    if (gen !== this._loadGen) { URL.revokeObjectURL(url); return null; }
+
+    const isLong = isFinite(metaDuration)
+      ? metaDuration > AudioEngine.LONG_TRACK_SECONDS
+      : blob.size > 25 * 1024 * 1024;
+
+    if (isLong) {
+      const a = new Audio();
+      a.preload = 'auto';
+      a.src = url;
+      this.streamEl = a;
+      this._objectUrl = url;
+      this.streamSrc = this.ctx.createMediaElementSource(a);
+      this.streamSrc.connect(this.preGain);
+      a.addEventListener('ended', () => {
+        if (gen !== this._loadGen) return;
+        this.playing = false;
+        if (this.onEndedCb) this.onEndedCb();
+      });
+      this.mode = 'stream';
+      this._streamMetaDuration = metaDuration;
+      this._applyPitchTempo();
+      this.playing = false;
+      return { duration: this.duration, mode: 'stream' };
+    }
+
+    const arrayBuffer = await blob.arrayBuffer();
+    if (gen !== this._loadGen) { URL.revokeObjectURL(url); return null; }
+    const audioBuffer = await this._decode(arrayBuffer);
+    if (gen !== this._loadGen) { URL.revokeObjectURL(url); return null; }
+    URL.revokeObjectURL(url);
+
+    this._endedFired = false;
+    this._bufferDuration = audioBuffer.duration;
+    this._bufSampleRate = audioBuffer.sampleRate;
+
+    if (await this._ensureWorklet()) {
+      if (gen !== this._loadGen) return null;
+      // hand the PCM to the audio thread and drop our reference — the DSP runs
+      // there, so heavy WSOLA work can never stall the UI (or the reverse)
+      const node = new AudioWorkletNode(this.ctx, 'soundtouch-processor', { numberOfInputs: 0, outputChannelCount: [2] });
+      const left = new Float32Array(audioBuffer.getChannelData(0));
+      const right = audioBuffer.numberOfChannels > 1
+        ? new Float32Array(audioBuffer.getChannelData(1))
+        : new Float32Array(audioBuffer.getChannelData(0));
+      node.port.postMessage({ type: 'load', left, right }, [left.buffer, right.buffer]);
+      node.port.onmessage = (e) => {
+        if (gen !== this._loadGen) return;
+        const m = e.data;
+        if (m.type === 'pos') {
+          this._workletPos = m.sourcePosition;
+        } else if (m.type === 'ended') {
+          this.playing = false;
+          if (this.onEndedCb) this.onEndedCb();
+        }
+      };
+      node.connect(this.preGain);
+      this.workletNode = node;
+      this._workletPos = 0;
+      this.buffer = null;
+      this.impl = 'worklet';
+    } else {
+      // legacy fallback: ScriptProcessor-based PitchShifter on the main thread
+      this.buffer = audioBuffer;
+      this.shifter = new PitchShifter(this.ctx, audioBuffer, 8192, () => {
+        // SoundTouch calls this once per audio block after the source runs dry —
+        // fire the app callback exactly once and stop the node
+        if (gen !== this._loadGen || this._endedFired) return;
+        this._endedFired = true;
+        this.pause();
+        if (this.onEndedCb) this.onEndedCb();
+      });
+      this._connected = false;
+      this.impl = 'scriptprocessor';
+    }
     this._applyPitchTempo();
-    this._connected = false;
     this.playing = false;
-    return { duration: audioBuffer.duration };
+    this.mode = 'buffer';
+    return { duration: audioBuffer.duration, mode: 'buffer' };
+  }
+
+  async _ensureWorklet() {
+    if (this._workletReady !== undefined) return this._workletReady;
+    if (!this.ctx.audioWorklet) { this._workletReady = false; return false; }
+    try {
+      await this.ctx.audioWorklet.addModule('js/soundtouch-worklet.js?v=6');
+      this._workletReady = true;
+    } catch (e) {
+      console.warn('AudioWorklet unavailable, falling back to ScriptProcessor:', e);
+      this._workletReady = false;
+    }
+    return this._workletReady;
+  }
+
+  _teardownWorklet() {
+    if (this.workletNode) {
+      try { this.workletNode.port.postMessage({ type: 'pause' }); } catch (e) {}
+      try { this.workletNode.disconnect(); } catch (e) {}
+      this.workletNode = null;
+    }
+    this._workletPos = 0;
   }
 
   _teardownShifter() {
@@ -219,10 +353,25 @@ export class AudioEngine {
       try { this.shifter.disconnect(); } catch (e) {}
       this.shifter = null;
     }
+    this._connected = false;
+  }
+
+  _teardownStream() {
+    if (this.streamSrc) {
+      try { this.streamSrc.disconnect(); } catch (e) {}
+      this.streamSrc = null;
+    }
+    if (this.streamEl) {
+      try { this.streamEl.pause(); this.streamEl.src = ''; } catch (e) {}
+      this.streamEl = null;
+    }
+    if (this._objectUrl) {
+      URL.revokeObjectURL(this._objectUrl);
+      this._objectUrl = null;
+    }
   }
 
   async play() {
-    if (!this.shifter) return;
     if (this.ctx.state === 'suspended') {
       // resume() never settles without user activation — don't let it hang playback
       await Promise.race([
@@ -230,36 +379,87 @@ export class AudioEngine {
         new Promise((r) => setTimeout(r, 1500)),
       ]);
     }
-    if (!this._connected) {
-      this.shifter.connect(this.preGain);
-      this._connected = true;
+    if (this.mode === 'stream' && this.streamEl) {
+      try { await this.streamEl.play(); } catch (e) { return false; }
+      this.playing = true;
+    } else if (this.workletNode) {
+      this.workletNode.port.postMessage({ type: 'play' });
+      this.playing = true;
+    } else if (this.shifter) {
+      if (!this._connected) {
+        this.shifter.connect(this.preGain);
+        this._connected = true;
+      }
+      this.playing = true;
+    } else {
+      return false;
     }
-    this.playing = true;
     return this.ctx.state === 'running';
   }
 
   pause() {
-    if (!this.shifter) return;
-    if (this._connected) {
+    if (this.mode === 'stream' && this.streamEl) {
+      this.streamEl.pause();
+    } else if (this.workletNode) {
+      this.workletNode.port.postMessage({ type: 'pause' });
+    } else if (this.shifter && this._connected) {
       try { this.shifter.disconnect(); } catch (e) {}
       this._connected = false;
     }
     this.playing = false;
   }
 
-  togglePlay() { this.playing ? this.pause() : this.play(); }
+  togglePlay() { return this.playing ? this.pause() : this.play(); }
 
   seekFraction(frac) {
-    if (!this.shifter) return;
-    this.shifter.percentagePlayed = Math.min(0.999, Math.max(0, frac));
+    frac = Math.min(0.999, Math.max(0, frac));
+    if (!isFinite(frac)) return;
+    this._endedFired = false;
+    if (this.mode === 'stream' && this.streamEl) {
+      if (this.duration > 0) this.streamEl.currentTime = frac * this.duration;
+    } else if (this.workletNode) {
+      const frames = frac * this._bufferDuration * this._bufSampleRate;
+      this._workletPos = frames; // optimistic, corrected by the next pos report
+      this.workletNode.port.postMessage({ type: 'seek', frames });
+    } else if (this.shifter) {
+      this.shifter.percentagePlayed = frac;
+    }
   }
 
-  get currentTime() { return this.shifter ? this.shifter.timePlayed : 0; }
-  get duration() { return this.buffer ? this.buffer.duration : 0; }
+  get currentTime() {
+    if (this.mode === 'stream' && this.streamEl) return this.streamEl.currentTime || 0;
+    if (this.workletNode) return this._workletPos / this._bufSampleRate;
+    return this.shifter ? this.shifter.timePlayed : 0;
+  }
+
+  get duration() {
+    if (this.mode === 'stream' && this.streamEl) {
+      const d = this.streamEl.duration;
+      return isFinite(d) && d > 0 ? d : (isFinite(this._streamMetaDuration) ? this._streamMetaDuration : 0);
+    }
+    return this._bufferDuration || (this.buffer ? this.buffer.duration : 0);
+  }
 
   setVolume(v) { this.masterGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.01); }
 
   _applyPitchTempo() {
+    if (this.mode === 'stream' && this.streamEl) {
+      // native time-stretch: preservesPitch=true is key-locked tempo,
+      // false is vinyl-style (speed and pitch change together)
+      this.streamEl.playbackRate = this.tempoPercent / 100;
+      this.streamEl.preservesPitch = this.keyLock;
+      if ('webkitPreservesPitch' in this.streamEl) this.streamEl.webkitPreservesPitch = this.keyLock;
+      return;
+    }
+    if (this.workletNode) {
+      this.workletNode.port.postMessage({
+        type: 'params',
+        tempo: this.tempoPercent / 100,
+        semis: this.pitchSemitones + this.fineCents / 100,
+        keyLock: this.keyLock,
+      });
+      return;
+    }
     if (!this.shifter) return;
     const totalSemis = this.pitchSemitones + this.fineCents / 100;
     if (this.keyLock) {
