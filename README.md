@@ -6,6 +6,8 @@ visuals. No build step — plain ES modules served over HTTP.
 
 ![status](https://img.shields.io/badge/runtime-browser-blue)
 
+**▶ Live demo: https://xereon.github.io/spectra-visualizer/** — requires WebGL (any normal desktop browser)
+
 ## Features
 
 ### Player
