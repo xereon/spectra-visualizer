@@ -1,7 +1,7 @@
-import { AudioEngine } from './audio-engine.js?v=6';
-import { Visualizer } from './visualizer.js?v=6';
-import { RazorOverlay } from './razor-overlay.js?v=6';
-import { THEMES, applyTheme } from './themes.js?v=6';
+import { AudioEngine } from './audio-engine.js?v=7';
+import { Visualizer } from './visualizer.js?v=7';
+import { RazorOverlay } from './razor-overlay.js?v=7';
+import { THEMES, applyTheme } from './themes.js?v=7';
 
 // the boot-error banner is shown by default in the HTML; reaching this line
 // means modules loaded, so remove it
@@ -21,7 +21,8 @@ try {
     setParam(k, v) { this.params[k] = v; },
     update() {},
   };
-  setTimeout(() => toast('WebGL unavailable — 3D visuals off, audio and spectrum still work'), 600);
+  const detail = (err && err.message) ? ` (${err.message.slice(0, 80)})` : '';
+  setTimeout(() => toast(`3D visuals unavailable${detail} — audio and spectrum still work`), 600);
 }
 const razor = new RazorOverlay(document.getElementById('razor'));
 
